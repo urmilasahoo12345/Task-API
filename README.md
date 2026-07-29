@@ -1,25 +1,26 @@
 # Task Management API (FastAPI)
 
 A lightweight CRUD REST API built with Python, FastAPI, and SQLite for FlyRank BE-02.
+---
+# Task API - Containerized Stack (BE-04)
+
+A RESTful Task Management API built with **FastAPI** and **PostgreSQL**, containerized using **Docker** and orchestrated with **Docker Compose**.
 
 ---
-## 💾 Database Architecture
 
-* **Database Engine:** SQLite (Chosen because it requires zero server setup and stores data locally in a single lightweight file).
-* **Storage Path:** `./tasks.db` (auto-generated in the project root on server startup).
-  
+## 🛠️ Tech Stack & Prerequisites
+
+* **Framework:** Python / FastAPI
+* **Database:** PostgreSQL
+* **Containerization:** Docker & Docker Compose
+* **Driver:** `psycopg2-binary`
+
 ---
-## 🚀 How to Install & Run
 
-### Prerequisites
-* Python 3.10+
-* Virtual environment (`.venv`) initialized
+## 🚀 Getting Started
 
-### Quickstart Command
-Run the server locally with a single command:
-
-```bash
-uvicorn main:app --reload
+### 1. Environment Configuration
+Create a `.env` file in the root directory based on `.env.example`:
 
 ```
 Screenshots

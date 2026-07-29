@@ -1,15 +1,18 @@
-import sqlite3
+import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Response, status
 from pydantic import BaseModel
 from typing import Optional
 
-DB_FILE = "tasks.db"
+
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/taskdb")
 
 def get_db():
-    """Establishes a connection to SQLite returning dictionary-like rows."""
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row 
+    """Establishes a connection to PostgreSQL returning dictionary-like rows."""
+
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
 
 def init_db():
@@ -19,18 +22,18 @@ def init_db():
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
-            done BOOLEAN NOT NULL DEFAULT 0
+            done BOOLEAN NOT NULL DEFAULT FALSE
         )
     """)
 
     cursor.execute("SELECT COUNT(*) FROM tasks")
-    count = cursor.fetchone()[0]
+    count = cursor.fetchone()['count']
 
     if count == 0:
         cursor.executemany("""
-            INSERT INTO tasks (title, done) VALUES (?, ?)
+            INSERT INTO tasks (title, done) VALUES (%s, %s)
         """, [
             ("Buy groceries", False),
             ("Finish backend assignment", True),
@@ -38,6 +41,7 @@ def init_db():
         ])
         conn.commit()
         
+    cursor.close()
     conn.close()
 
 @asynccontextmanager
@@ -47,7 +51,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Task API",
-    description="A simple task management backend API using SQLite for persistence.",
+    description="A simple task management backend API using PostgreSQL for persistence.",
     version="1.0",
     lifespan=lifespan
 )
@@ -55,7 +59,6 @@ app = FastAPI(
 class TaskPayload(BaseModel):
     title: Optional[str] = None
     done: Optional[bool] = None
-
 
 @app.get("/", summary="Root API Info")
 def read_root():
@@ -67,14 +70,15 @@ def health_check():
     """Checks if the server is alive and functioning properly."""
     return {"status": "ok"}
 
-
 @app.get("/tasks", summary="List All Tasks")
 def get_tasks():
-    """Fetches all tasks directly from the SQLite database."""
+    """Fetches all tasks directly from the PostgreSQL database."""
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, title, done FROM tasks")
+    cursor.execute("SELECT id, title, done FROM tasks ORDER BY id ASC")
     rows = cursor.fetchall()
+    
+    cursor.close()
     conn.close()
     
     return [{"id": row["id"], "title": row["title"], "done": bool(row["done"])} for row in rows]
@@ -84,8 +88,10 @@ def get_task(id: int):
     """Fetches a specific task by ID from the database. Returns 404 if not found."""
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, title, done FROM tasks WHERE id = ?", (id,))
+    cursor.execute("SELECT id, title, done FROM tasks WHERE id = %s", (id,))
     row = cursor.fetchone()
+    
+    cursor.close()
     conn.close()
     
     if not row:
@@ -93,25 +99,27 @@ def get_task(id: int):
         
     return {"id": row["id"], "title": row["title"], "done": bool(row["done"])}
 
-
 @app.post("/tasks", status_code=status.HTTP_201_CREATED, summary="Create a New Task")
 def create_task(payload: TaskPayload):
-    """Inserts a new task into the SQLite database."""
+    """Inserts a new task into the PostgreSQL database."""
     if not payload.title or not payload.title.strip():
         raise HTTPException(status_code=400, detail="Title cannot be empty")
     
     conn = get_db()
     cursor = conn.cursor()
+    
+    # Postgres uses RETURNING to get the ID of the newly inserted row
     cursor.execute(
-        "INSERT INTO tasks (title, done) VALUES (?, ?)", 
+        "INSERT INTO tasks (title, done) VALUES (%s, %s) RETURNING id", 
         (payload.title.strip(), False)
     )
+    new_id = cursor.fetchone()['id']
     conn.commit()
-    new_id = cursor.lastrowid
+    
+    cursor.close()
     conn.close()
     
     return {"id": new_id, "title": payload.title.strip(), "done": False}
-
 
 @app.put("/tasks/{id}", summary="Update a Task")
 def update_task(id: int, payload: TaskPayload):
@@ -119,13 +127,15 @@ def update_task(id: int, payload: TaskPayload):
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT id, title, done FROM tasks WHERE id = ?", (id,))
+    cursor.execute("SELECT id, title, done FROM tasks WHERE id = %s", (id,))
     existing = cursor.fetchone()
     if not existing:
+        cursor.close()
         conn.close()
         raise HTTPException(status_code=404, detail={"error": "Task not found"})
 
     if payload.title is not None and not payload.title.strip():
+        cursor.close()
         conn.close()
         raise HTTPException(status_code=400, detail="Title cannot be empty")
 
@@ -133,10 +143,12 @@ def update_task(id: int, payload: TaskPayload):
     new_done = payload.done if payload.done is not None else bool(existing["done"])
     
     cursor.execute(
-        "UPDATE tasks SET title = ?, done = ? WHERE id = ?",
+        "UPDATE tasks SET title = %s, done = %s WHERE id = %s",
         (new_title, new_done, id)
     )
     conn.commit()
+    
+    cursor.close()
     conn.close()
     
     return {"id": id, "title": new_title, "done": new_done}
@@ -147,9 +159,11 @@ def delete_task(id: int):
     conn = get_db()
     cursor = conn.cursor()
     
-    cursor.execute("DELETE FROM tasks WHERE id = ?", (id,))
-    conn.commit()
+    cursor.execute("DELETE FROM tasks WHERE id = %s", (id,))
     deleted_count = cursor.rowcount
+    conn.commit()
+    
+    cursor.close()
     conn.close()
     
     if deleted_count == 0:

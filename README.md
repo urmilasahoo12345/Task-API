@@ -23,6 +23,7 @@ A RESTful Task Management API built with **FastAPI** and **PostgreSQL**, contain
 Create a `.env` file in the root directory based on `.env.example`:
 
 ```
+```
 Screenshots
 <img width="1332" height="544" alt="curl -i" src="https://github.com/user-attachments/assets/a51e9755-135f-4d49-9145-0d234d79edb3" />
 <img width="2812" height="1402" alt="swagger ui" src="https://github.com/user-attachments/assets/df2131de-c0b9-4674-a675-7d453ebdf389" />

@@ -1,172 +1,122 @@
 import os
-import psycopg2
-from psycopg2.extras import RealDictCursor
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Response, status
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Depends, Response, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, EmailStr
 from typing import Optional
+from supabase import create_client, Client
+from dotenv import load_dotenv
 
+load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/taskdb")
+# --- Supabase Setup ---
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://axzjxppjdvndgrbwycrf.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-def get_db():
-    """Establishes a connection to PostgreSQL returning dictionary-like rows."""
+if not SUPABASE_KEY:
+    raise ValueError("SUPABASE_KEY must be set in .env")
 
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-    return conn
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def init_db():
-    """Stage 0: Creates tasks table and inserts seed data ONLY IF empty."""
-    conn = get_db()
-    cursor = conn.cursor()
+# Enables Bearer token auth & Lock button in Swagger UI (/docs)
+security_scheme = HTTPBearer()
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tasks (
-            id SERIAL PRIMARY KEY,
-            title TEXT NOT NULL,
-            done BOOLEAN NOT NULL DEFAULT FALSE
-        )
-    """)
-
-    cursor.execute("SELECT COUNT(*) FROM tasks")
-    count = cursor.fetchone()['count']
-
-    if count == 0:
-        cursor.executemany("""
-            INSERT INTO tasks (title, done) VALUES (%s, %s)
-        """, [
-            ("Buy groceries", False),
-            ("Finish backend assignment", True),
-            ("Clean the room", False)
-        ])
-        conn.commit()
-        
-    cursor.close()
-    conn.close()
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_db()
-    yield
-
+# --- App Initialization ---
 app = FastAPI(
-    title="Task API",
-    description="A simple task management backend API using PostgreSQL for persistence.",
-    version="1.0",
-    lifespan=lifespan
+    title="Auth - Login & Protect API",
+    description="BE-03 Assignment with FastAPI and Supabase Auth",
+    version="1.0"
 )
+
+# --- Models ---
+class AuthPayload(BaseModel):
+    email: EmailStr
+    password: str
 
 class TaskPayload(BaseModel):
     title: Optional[str] = None
     done: Optional[bool] = None
 
+# --- Middleware / Dependency for Token Verification ---
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security_scheme)):
+    """Verifies the Bearer JWT token against Supabase."""
+    token = credentials.credentials
+    try:
+        user_response = supabase.auth.get_user(token)
+        if not user_response or not user_response.user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"error": "Invalid or expired token"}
+            )
+        return user_response.user
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "Invalid or expired token"}
+        )
+
+# --- Auth Routes ---
+@app.post("/auth/signup", status_code=status.HTTP_201_CREATED, summary="Create account")
+def signup(payload: AuthPayload):
+    try:
+        response = supabase.auth.sign_up({
+            "email": payload.email,
+            "password": payload.password
+        })
+        return {
+            "message": "User created successfully",
+            "user": {
+                "id": response.user.id if response.user else None,
+                "email": payload.email
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+@app.post("/auth/login", status_code=status.HTTP_200_OK, summary="Log in & get JWT")
+def login(payload: AuthPayload):
+    try:
+        response = supabase.auth.sign_in_with_password({
+            "email": payload.email,
+            "password": payload.password
+        })
+        return {
+            "access_token": response.session.access_token,
+            "refresh_token": response.session.refresh_token,
+            "token_type": "bearer"
+        }
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "Invalid login credentials"}
+        )
+
+@app.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT, summary="Logout")
+def logout(credentials: HTTPAuthorizationCredentials = Depends(security_scheme)):
+    try:
+        supabase.auth.sign_out(credentials.credentials)
+    except Exception:
+        pass
+    return None
+
+# --- Public & Protected Gates ---
+@app.get("/public/info", summary="Public Info")
+def public_info():
+    return {"message": "Welcome! This information is publicly accessible."}
+
+@app.get("/protected/profile", summary="Protected User Profile")
+def get_profile(user=Depends(get_current_user)):
+    return {
+        "id": user.id,
+        "email": user.email,
+        "created_at": str(user.created_at)
+    }
+
+# --- Base Info Routes ---
 @app.get("/", summary="Root API Info")
 def read_root():
-    """Returns basic metadata and available routes for this API."""
-    return {"name": "Task API", "version": "1.0", "endpoints": ["/tasks"]}
+    return {"name": "Task API", "version": "1.0", "endpoints": ["/auth/signup", "/auth/login", "/protected/profile", "/tasks"]}
 
 @app.get("/health", summary="Health Check")
 def health_check():
-    """Checks if the server is alive and functioning properly."""
     return {"status": "ok"}
-
-@app.get("/tasks", summary="List All Tasks")
-def get_tasks():
-    """Fetches all tasks directly from the PostgreSQL database."""
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, title, done FROM tasks ORDER BY id ASC")
-    rows = cursor.fetchall()
-    
-    cursor.close()
-    conn.close()
-    
-    return [{"id": row["id"], "title": row["title"], "done": bool(row["done"])} for row in rows]
-
-@app.get("/tasks/{id}", summary="Get Single Task by ID")
-def get_task(id: int):
-    """Fetches a specific task by ID from the database. Returns 404 if not found."""
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, title, done FROM tasks WHERE id = %s", (id,))
-    row = cursor.fetchone()
-    
-    cursor.close()
-    conn.close()
-    
-    if not row:
-        raise HTTPException(status_code=404, detail={"error": "Task not found"})
-        
-    return {"id": row["id"], "title": row["title"], "done": bool(row["done"])}
-
-@app.post("/tasks", status_code=status.HTTP_201_CREATED, summary="Create a New Task")
-def create_task(payload: TaskPayload):
-    """Inserts a new task into the PostgreSQL database."""
-    if not payload.title or not payload.title.strip():
-        raise HTTPException(status_code=400, detail="Title cannot be empty")
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # Postgres uses RETURNING to get the ID of the newly inserted row
-    cursor.execute(
-        "INSERT INTO tasks (title, done) VALUES (%s, %s) RETURNING id", 
-        (payload.title.strip(), False)
-    )
-    new_id = cursor.fetchone()['id']
-    conn.commit()
-    
-    cursor.close()
-    conn.close()
-    
-    return {"id": new_id, "title": payload.title.strip(), "done": False}
-
-@app.put("/tasks/{id}", summary="Update a Task")
-def update_task(id: int, payload: TaskPayload):
-    """Updates an existing task in the database."""
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT id, title, done FROM tasks WHERE id = %s", (id,))
-    existing = cursor.fetchone()
-    if not existing:
-        cursor.close()
-        conn.close()
-        raise HTTPException(status_code=404, detail={"error": "Task not found"})
-
-    if payload.title is not None and not payload.title.strip():
-        cursor.close()
-        conn.close()
-        raise HTTPException(status_code=400, detail="Title cannot be empty")
-
-    new_title = payload.title.strip() if payload.title is not None else existing["title"]
-    new_done = payload.done if payload.done is not None else bool(existing["done"])
-    
-    cursor.execute(
-        "UPDATE tasks SET title = %s, done = %s WHERE id = %s",
-        (new_title, new_done, id)
-    )
-    conn.commit()
-    
-    cursor.close()
-    conn.close()
-    
-    return {"id": id, "title": new_title, "done": new_done}
-
-@app.delete("/tasks/{id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a Task")
-def delete_task(id: int):
-    """Deletes a task by ID from the database."""
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute("DELETE FROM tasks WHERE id = %s", (id,))
-    deleted_count = cursor.rowcount
-    conn.commit()
-    
-    cursor.close()
-    conn.close()
-    
-    if deleted_count == 0:
-        raise HTTPException(status_code=404, detail={"error": "Task not found"})
-        
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
